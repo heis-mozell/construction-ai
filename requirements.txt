@@ -3,3 +3,4 @@ requests
 tldextract
 openai
 pandas
+python-dotenv
