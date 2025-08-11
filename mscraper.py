@@ -15,9 +15,15 @@ load_dotenv()
 ### --------- CONFIG (keys from .env) ------------
 import openai
 
-openai.api_key = OPENAI_API_KEY
-SERP_API_KEY = os.getenv("SERP_API_KEY")
+import os
+import openai
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+SERP_API_KEY = os.getenv("SERP_API_KEY")
+
+if OPENAI_API_KEY is None:
+    raise ValueError("OPENAI_API_KEY is missing!")
+
 openai.api_key = OPENAI_API_KEY
 OPENAI_MODEL = "gpt-4o-mini"   # uses Chat Completions interface
 SERPAPI_URL = "https://serpapi.com/search.json"
