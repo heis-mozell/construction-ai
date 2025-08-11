@@ -18,6 +18,7 @@ import openai
 openai.api_key = OPENAI_API_KEY
 SERP_API_KEY = os.getenv("SERP_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+openai.api_key = OPENAI_API_KEY
 OPENAI_MODEL = "gpt-4o-mini"   # uses Chat Completions interface
 SERPAPI_URL = "https://serpapi.com/search.json"
 RESULTS_PER_RUN = 100           # 10 pages * 10 results/page
