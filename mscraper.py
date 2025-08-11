@@ -13,6 +13,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 ### --------- CONFIG (keys from .env) ------------
+import openai
+
+openai.api_key = OPENAI_API_KEY
 SERP_API_KEY = os.getenv("SERP_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = "gpt-4o-mini"   # uses Chat Completions interface
