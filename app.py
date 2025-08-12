@@ -5,7 +5,8 @@ import time
 from datetime import datetime
 import json
 import re
-import mscraper as scraper  # Import all your existing functions
+import csv
+import mscraper as scraper  # Import all scraper functions
 
 OUTPUT_FILE = scraper.OUTPUT_FILE
 
@@ -74,8 +75,7 @@ if run_button:
         batch = filtered[i:i+scraper.BATCH_SIZE]
         batch_num += 1
         status_placeholder.write(f"⚙️ Sending batch {batch_num} ({i+1}-{i+len(batch)}) to GPT...")
-        prompt = scraper.build_prompt(batch, batch_num)
-        raw = scraper.safe_gpt_call(prompt, max_retries=5)
+        raw = scraper.safe_gpt_call(scraper.build_prompt(batch, batch_num), max_retries=5)
 
         if not raw:
             continue
@@ -89,12 +89,13 @@ if run_button:
         except:
             continue
 
-        # Write validated rows
+        # Write validated rows in proper column order
         written = 0
         with open(OUTPUT_FILE, "a", newline="", encoding="utf-8") as f:
-            import csv
             w = csv.writer(f)
             for obj in parsed:
+                if not isinstance(obj, dict):
+                    continue
                 tn = (obj.get("tool_name") or "").strip()
                 desc = (obj.get("description") or "").strip()
                 web = (obj.get("website") or "").strip()
@@ -102,6 +103,7 @@ if run_button:
                 tags = (obj.get("tags") or "").strip()
                 reviews = (obj.get("reviews") or "").strip()
                 launch = (obj.get("launch_date") or "").strip()
+
                 if not tn or not desc or not web or not src:
                     continue
                 if not re.match(r"^\d+$", reviews or ""):
@@ -112,7 +114,9 @@ if run_button:
                     tags = "AI, construction"
                 if tn.lower() in (s.lower() for s in seen):
                     continue
-                w.writerow([tn, desc, web, src, tags, reviews, launch, datetime.utcnow().isoformat()])
+
+                # Write only 7 columns
+                w.writerow([tn, desc, web, src, tags, reviews, launch])
                 seen.add(tn)
                 written += 1
                 total_saved += 1
@@ -127,10 +131,13 @@ if run_button:
 
     status_placeholder.success(f"✅ Done! {total_saved} new tools saved. Last offset: {new_offset}")
 
-# Always show the CSV data if available
-if os.path.exists(OUTPUT_FILE):
-    df = pd.read_csv(OUTPUT_FILE)
-    st.write(f"### 📊 Current scraped tools ({len(df)})")
-    st.dataframe(df)
+# Show CSV data
+if os.path.exists(OUTPUT_FILE) and os.path.getsize(OUTPUT_FILE) > 0:
+    try:
+        df = pd.read_csv(OUTPUT_FILE, names=["Tool name", "Description", "Website", "Source", "Tags", "Reviews", "Launch date"])
+        st.write(f"### 📊 Current scraped tools ({len(df)})")
+        st.dataframe(df)
+    except Exception as e:
+        st.error(f"Error reading CSV: {e}")
 else:
     st.info("No scraped data yet. Run the scraper to see results.")
