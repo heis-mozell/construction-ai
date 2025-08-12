@@ -21,7 +21,6 @@ run_button = st.button("🚀 Run Scraper")
 # Progress placeholder
 status_placeholder = st.empty()
 
-# Run scraper when button clicked
 if run_button:
     status_placeholder.write("### ⏳ Running scraper... Please wait.")
 
@@ -89,7 +88,6 @@ if run_button:
         except:
             continue
 
-        # Write validated rows in proper column order
         written = 0
         with open(OUTPUT_FILE, "a", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
@@ -115,7 +113,6 @@ if run_button:
                 if tn.lower() in (s.lower() for s in seen):
                     continue
 
-                # Write only 7 columns
                 w.writerow([tn, desc, web, src, tags, reviews, launch])
                 seen.add(tn)
                 written += 1
@@ -124,17 +121,15 @@ if run_button:
         progress_bar.progress(min((i+scraper.BATCH_SIZE)/len(filtered), 1.0))
         time.sleep(1.2)
 
-    # Save updated state
-    new_offset = start_offset + (scraper.PAGES_PER_RUN * scraper.RESULTS_PER_PAGE)
-    scraper.save_last_offset(new_offset)
+    scraper.save_last_offset(start_offset + (scraper.PAGES_PER_RUN * scraper.RESULTS_PER_PAGE))
     scraper.save_seen(seen)
 
-    status_placeholder.success(f"✅ Done! {total_saved} new tools saved. Last offset: {new_offset}")
+    status_placeholder.success(f"✅ Done! {total_saved} new tools saved.")
 
 # Show CSV data
 if os.path.exists(OUTPUT_FILE) and os.path.getsize(OUTPUT_FILE) > 0:
     try:
-        df = pd.read_csv(OUTPUT_FILE, names=["Tool name", "Description", "Website", "Source", "Tags", "Reviews", "Launch date"])
+        df = pd.read_csv(OUTPUT_FILE)  # ✅ Reads header row from CSV
         st.write(f"### 📊 Current scraped tools ({len(df)})")
         st.dataframe(df)
     except Exception as e:
