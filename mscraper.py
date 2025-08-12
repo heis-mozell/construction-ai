@@ -1,4 +1,6 @@
-# mscraper.py — Construction AI Scraper with strong source detection + GPT fallback
+# mscraper.py
+# Scraper with improved source detection + CSV headers + dedupe
+
 import os, time, json, csv, re
 from urllib.parse import urlparse
 import requests
@@ -23,66 +25,44 @@ RATE_LIMIT_BACKOFF = 8
 
 openai.api_key = OPENAI_API_KEY
 
-# 🏗️ Known sources — Construction / AI / Directories / Reviews / Social
+# ✅ Curated trusted & social sources
 KNOWN_SOURCES = {
-    # --- Construction / AEC / Industry ---
-    "aec-business.com": "AEC Business",
-    "constructconnect.com": "ConstructConnect",
-    "constructionexec.com": "Construction Executive",
-    "constructiondive.com": "Construction Dive",
-    "theconstructionindex.co.uk": "The Construction Index",
-    "constructionweekonline.com": "Construction Week",
-    "constructionglobal.com": "Construction Global",
-    "constructech.com": "Constructech",
-    "buildingenclosureonline.com": "Building Enclosure",
-    "forconstructionpros.com": "For Construction Pros",
-    "construction-today.com": "Construction Today",
-    "designandbuildreview.com": "Design & Build Review",
-    "pbctoday.co.uk": "PBC Today",
-    "giatecscientific.com": "Giatec Scientific",
-    "constructionplacements.com": "Construction Placements",
-    "building.co.uk": "Building UK",
-    "bimplus.co.uk": "BIMplus",
-    "bimcommunity.com": "BIM Community",
-    "bimstore.co.uk": "BIM Store",
-    "bimcorner.com": "BIM Corner",
-    "geospatialworld.net": "Geospatial World",
-    "archdaily.com": "ArchDaily",
-    "engineering.com": "Engineering.com",
-    "civilplus.com": "Civil Plus",
-
-    # --- AI Tool Directories & SaaS Reviews ---
-    "theresanaiforthat.com": "There's an AI For That",
-    "futurepedia.io": "Futurepedia",
-    "aitoolhunt.com": "AI Tool Hunt",
-    "toolify.ai": "Toolify",
-    "aibusiness.com": "AI Business",
-    "unite.ai": "Unite.AI",
-    "aitoptools.com": "AI Top Tools",
-    "aitooltracker.com": "AI Tool Tracker",
-    "insidr.ai": "Insidr.AI",
+    # AI tool directories
+    "thereis.an.ai": "There's An AI For That",
     "g2.com": "G2",
-    "capterra.com": "Capterra",
-    "getapp.com": "GetApp",
-    "softwareadvice.com": "Software Advice",
-    "saasworthy.com": "SaaSworthy",
-    "trustpilot.com": "Trustpilot",
     "producthunt.com": "Product Hunt",
-    "betalist.com": "BetaList",
-    "angel.co": "AngelList",
-    "crunchbase.com": "Crunchbase",
-    "appsumo.com": "AppSumo",
+    "futuretools.io": "FutureTools",
+    "aitoolhunt.com": "AI Tool Hunt",
+    "aitoptools.com": "AI Top Tools",
+    "toolify.ai": "Toolify",
+    "allthingsai.com": "All Things AI",
+    "theresanaiforthat.com": "There's An AI For That",
+    "aitools.fyi": "AI Tools FYI",
+    "aitooltracker.com": "AI Tool Tracker",
+    "saashub.com": "SaaSHub",
+    "getapp.com": "GetApp",
+    "alternativeto.net": "AlternativeTo",
 
-    # --- Social Media & Community ---
+    # Social / media
     "linkedin.com": "LinkedIn",
-    "twitter.com": "Twitter",
+    "twitter.com": "Twitter / X",
     "reddit.com": "Reddit",
     "youtube.com": "YouTube",
     "medium.com": "Medium",
     "dev.to": "Dev.to",
     "facebook.com": "Facebook",
     "instagram.com": "Instagram",
-    "tiktok.com": "TikTok",
+    "pinterest.com": "Pinterest",
+
+    # News / blogs
+    "constructiondive.com": "Construction Dive",
+    "forconstructionpros.com": "For Construction Pros",
+    "engineering.com": "Engineering.com",
+    "archdaily.com": "ArchDaily",
+    "theconstructor.org": "The Constructor",
+    "constructionexec.com": "Construction Executive",
+    "bimplus.co.uk": "Bimplus",
+    "constructconnect.com": "ConstructConnect",
 }
 
 def ensure_output_exists():
@@ -141,63 +121,35 @@ def domain_from_url(url):
     except:
         return ""
 
+# ✅ Updated classify_source
 def classify_source(displayed_link, snippet, title, website_url=None):
     """
-    Detects source of the tool based on known domains and avoids marking
-    the tool's own website as the source.
+    Detect source from displayed_link, snippet, title, but ensure it's not same as tool website.
     """
-    s = (displayed_link or "").lower()
-    full_text = (displayed_link or "") + " " + (snippet or "") + " " + (title or "")
-    full_text = full_text.lower()
+    # Get website domain to avoid matching as source
+    website_domain = domain_from_url(website_url) if website_url else ""
 
-    website_domain = ""
-    if website_url:
-        website_domain = domain_from_url(website_url)
+    # Check in known list
+    for k, v in KNOWN_SOURCES.items():
+        if k in (displayed_link or "").lower() and k != website_domain:
+            return v
 
-    for domain, source_name in KNOWN_SOURCES.items():
-        if domain in s or domain in full_text:
-            if website_domain and domain in website_domain:
-                continue
-            return source_name
+    combined_text = " ".join([displayed_link or "", snippet or "", title or ""]).lower()
+    for k, v in KNOWN_SOURCES.items():
+        if k in combined_text and k != website_domain:
+            return v
 
-    # Fallback keywords
-    if "product hunt" in full_text:
-        return "Product Hunt"
-    if "linkedin" in full_text:
+    # If nothing matches, guess
+    if "linkedin" in combined_text:
         return "LinkedIn"
-    if "reddit" in full_text:
+    if "reddit" in combined_text:
         return "Reddit"
-    if "g2" in full_text:
+    if "g2" in combined_text:
         return "G2"
-    if "construction" in full_text:
-        return "Construction News"
+    if "product hunt" in combined_text:
+        return "Product Hunt"
 
     return "Google Search"
-
-def gpt_guess_source(tool_name, description):
-    """
-    Asks GPT to guess a relevant source for a tool if unknown.
-    """
-    prompt = f"""
-You are a research assistant for Construction AI tools.
-A tool is called '{tool_name}' and its description is:
-{description}
-
-Guess the most likely source where this tool could be listed or discovered,
-choosing from known industry, AI directories, SaaS review platforms, or social media.
-
-Only return the source name (e.g., "G2", "Product Hunt", "Construction Dive", "LinkedIn").
-"""
-    try:
-        resp = openai.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0
-        )
-        guess = resp.choices[0].message.content.strip()
-        return guess
-    except:
-        return "Google Search"
 
 def extract_review_count(text):
     if not text:
