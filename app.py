@@ -6,9 +6,17 @@ from datetime import datetime
 import json
 import re
 import csv
-import mscraper as scraper  # Import all scraper functions
+import mscraper as scraper  # Import scraper functions
 
 OUTPUT_FILE = scraper.OUTPUT_FILE
+
+# ✅ Helper to safely convert to string
+def safe_str(value):
+    if isinstance(value, str):
+        return value.strip()
+    if value is None:
+        return ""
+    return str(value).strip()
 
 st.set_page_config(page_title="🏗️ Construction AI Scraper", layout="wide")
 st.title("🏗️ Construction AI Tools Scraper")
@@ -88,19 +96,20 @@ if run_button:
         except:
             continue
 
-        written = 0
+        # Write validated rows
         with open(OUTPUT_FILE, "a", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             for obj in parsed:
                 if not isinstance(obj, dict):
                     continue
-                tn = (obj.get("tool_name") or "").strip()
-                desc = (obj.get("description") or "").strip()
-                web = (obj.get("website") or "").strip()
-                src = (obj.get("source") or "").strip()
-                tags = (obj.get("tags") or "").strip()
-                reviews = (obj.get("reviews") or "").strip()
-                launch = (obj.get("launch_date") or "").strip()
+
+                tn = safe_str(obj.get("tool_name"))
+                desc = safe_str(obj.get("description"))
+                web = safe_str(obj.get("website"))
+                src = safe_str(obj.get("source"))
+                tags = safe_str(obj.get("tags"))
+                reviews = safe_str(obj.get("reviews"))
+                launch = safe_str(obj.get("launch_date"))
 
                 if not tn or not desc or not web or not src:
                     continue
@@ -115,7 +124,6 @@ if run_button:
 
                 w.writerow([tn, desc, web, src, tags, reviews, launch])
                 seen.add(tn)
-                written += 1
                 total_saved += 1
 
         progress_bar.progress(min((i+scraper.BATCH_SIZE)/len(filtered), 1.0))
@@ -126,10 +134,10 @@ if run_button:
 
     status_placeholder.success(f"✅ Done! {total_saved} new tools saved.")
 
-# Show CSV data
+# Show CSV
 if os.path.exists(OUTPUT_FILE) and os.path.getsize(OUTPUT_FILE) > 0:
     try:
-        df = pd.read_csv(OUTPUT_FILE)  # ✅ Reads header row from CSV
+        df = pd.read_csv(OUTPUT_FILE, names=["Tool name", "Description", "Website", "Source", "Tags", "Reviews", "Launch date"], header=0)
         st.write(f"### 📊 Current scraped tools ({len(df)})")
         st.dataframe(df)
     except Exception as e:
