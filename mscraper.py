@@ -277,7 +277,7 @@ if __name__ == "__main__":
                 launch = (obj.get("launch_date") or "").strip()
 
                 if tn.lower() in (s.lower() for s in seen): continue
-                w.writerow([tn, desc, web, src, tags, reviews, launch, datetime.utcnow().isoformat()])
+                w.writerow([tn, desc, web, src, tags, reviews, launch,])
                 seen.add(tn)
                 written += 1
                 total_saved += 1
