@@ -1,260 +1,115 @@
 # mscraper.py
-# Updated scraper with memory-based source guessing rules and looser GPT filtering
-# Always tries to return at least some results
+# Scraper with GPT-powered source guessing for Construction AI tools
+# Requirements: pip install requests openai serpapi tldextract
 
-import os
-import time
-import json
-import csv
-import re
+import os, csv, json, time
 import requests
 import tldextract
 from urllib.parse import urlparse
 from datetime import datetime
-from dotenv import load_dotenv
+import openai
 
-load_dotenv()
+# --------------- CONFIG ----------------
+SERP_API_KEY = os.getenv("SERP_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# -------- CONFIG --------
-SERP_API_KEY = os.getenv("SERP_API_KEY", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-SERPAPI_URL = "https://serpapi.com/search.json"
+openai.api_key = OPENAI_API_KEY
 
-RESULTS_PER_RUN = 100
-PAGES_PER_RUN = 10
-RESULTS_PER_PAGE = 10
-BATCH_SIZE = 10
-OUTPUT_FILE = "construction_tools.csv"
-SEEN_FILE = "seen_tools.csv"
-LAST_OFFSET_FILE = "last_offset.txt"
-RATE_LIMIT_BACKOFF = 8
-MAX_NEW_PER_RUN = 200
+TRUSTED_SOURCES = [
+    "Product Hunt", "G2", "An AI For That", "Crunchbase", "AngelList",
+    "AppSumo", "LinkedIn", "Reddit", "Medium", "YouTube",
+    "BuiltWorlds", "AEC Magazine", "Construction Dive", "Engineering News-Record",
+    "BIM+ (Building Information Modelling)", "The B1M", "Construction Executive",
+    "Construction Business Owner", "Smart Cities Dive", "InfraTech Digital",
+    "ArchDaily", "Dezeen", "DesignBoom", "RICS", "Urban Developer"
+]
 
-# ---------- KNOWN / TRUSTED SOURCES ----------
-KNOWN_SOURCES = {
-    "producthunt": "Product Hunt",
-    "g2.com": "G2",
-    "an.ai.for.that": "TheresAnAIForThat",
-    "futurepedia.io": "Futurepedia",
-    "futuretools.io": "FutureTools",
-    "crunchbase.com": "Crunchbase",
-    "angel.co": "AngelList",
-    "appsumo.com": "AppSumo",
-    "linkedin.com": "LinkedIn",
-    "reddit.com": "Reddit",
-    "medium.com": "Medium",
-    "youtube.com": "YouTube",
-    "builtworlds.com": "BuiltWorlds",
-    "github.com": "GitHub",
-    "dev.to": "Dev.to",
-    "autodesk.com": "Autodesk",
-    "constructiondive.com": "Construction Dive",
-    "enr.com": "ENR",
-    "archdaily.com": "ArchDaily",
-    "bimforum.org": "BIMForum",
-    "forconstructionpros.com": "ForConstructionPros",
-    "bdcnetwork.com": "Building Design + Construction",
-    "constructionexec.com": "Construction Executive"
-}
-
-# ---------- Helpers ----------
-def ensure_output_exists():
-    if not os.path.exists(OUTPUT_FILE):
-        with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerow(["tool_name", "description", "website", "source", "tags", "reviews", "launch_date"])
-
-def load_seen():
-    if os.path.exists(SEEN_FILE):
-        return set(open(SEEN_FILE, "r", encoding="utf-8").read().splitlines())
-    return set()
-
-def save_seen(seen_set):
-    with open(SEEN_FILE, "w", encoding="utf-8") as f:
-        for s in sorted(seen_set):
-            f.write(s + "\n")
-
-def load_last_offset():
-    if os.path.exists(LAST_OFFSET_FILE):
-        try:
-            return int(open(LAST_OFFSET_FILE, "r").read().strip())
-        except:
-            return 0
-    return 0
-
-def save_last_offset(offset):
-    open(LAST_OFFSET_FILE, "w", encoding="utf-8").write(str(int(offset)))
-
-def domain_from_url(url):
-    try:
-        ex = tldextract.extract(url)
-        return f"{ex.domain}.{ex.suffix}".lower() if ex.domain and ex.suffix else ""
-    except:
-        return ""
-
-# ---------- Source Guessing (Memory Rules) ----------
-def classify_source(displayed_link, snippet, title, website_domain=None):
-    # Rule 1: Primary match from known list
-    s_link = (displayed_link or "").lower()
-    for k, v in KNOWN_SOURCES.items():
-        if k in s_link and (not website_domain or k not in website_domain):
-            return v
-
-    # Rule 2: Secondary match from snippet/title clues
-    text = f"{snippet or ''} {title or ''}".lower()
-    for k, v in KNOWN_SOURCES.items():
-        if k.replace(".com", "") in text and (not website_domain or k not in website_domain):
-            return v
-
-    # Rule 3: Domain separation
-    link_domain = domain_from_url(s_link)
-    if website_domain and link_domain == website_domain:
-        pass
-    elif link_domain:
-        return link_domain
-
-    # Rule 4: Last fallback
-    return "General Web"
-
-# ---------- OPENAI Setup ----------
-try:
-    from openai import OpenAI
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    new_openai = True
-except:
-    import openai
-    openai.api_key = OPENAI_API_KEY
-    client = openai
-    new_openai = False
-
-def safe_gpt_call(prompt):
-    for attempt in range(5):
-        try:
-            if new_openai:
-                resp = client.chat.completions.create(
-                    model=OPENAI_MODEL,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0,
-                    max_tokens=1200
-                )
-                return resp.choices[0].message.content.strip()
-            else:
-                resp = client.ChatCompletion.create(
-                    model=OPENAI_MODEL,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0,
-                    max_tokens=1200
-                )
-                return resp["choices"][0]["message"]["content"].strip()
-        except Exception as e:
-            print(f"⚠ GPT call failed ({e}), retrying...")
-            time.sleep(RATE_LIMIT_BACKOFF * (attempt+1))
-    return None
-
-# ---------- Prompt ----------
-def build_prompt(batch):
-    payload = json.dumps(batch, ensure_ascii=False)
-    return f"""
-You are extracting AI and construction tool data.
-For each JSON item, return: tool_name, description, website, source, tags, reviews, launch_date.
-Rules:
-- Always extract tool_name if reasonably guessable from title.
-- If website missing, use domain from link.
-- Source must follow rules: prefer reputable sources, avoid using tool's own domain, fallback to 'General Web'.
-- tags: up to 6 relevant keywords from title/snippet, else 'AI, construction'.
-- reviews: number if found, else "0".
-- launch_date: short month-year or year, else "".
-Return STRICT JSON array.
-INPUT:
-{payload}
-"""
-
-# ---------- SERP Fetch ----------
-def run_serpapi_pages(start_offset, query):
+# --------------- FUNCTIONS ----------------
+def serp_search(query, num_results=100):
+    """Fetch search results from SerpAPI"""
+    print(f"Searching: {query}")
+    params = {
+        "engine": "google",
+        "q": query,
+        "num": 10,
+        "start": 0,
+        "api_key": SERP_API_KEY
+    }
     results = []
-    for page in range(PAGES_PER_RUN):
-        offset = start_offset + page * RESULTS_PER_PAGE
-        try:
-            r = requests.get(SERPAPI_URL, params={
-                "engine": "google",
-                "q": query,
-                "start": offset,
-                "num": RESULTS_PER_PAGE,
-                "api_key": SERP_API_KEY
-            }, timeout=20)
-            r.raise_for_status()
-            data = r.json()
-            for h in data.get("organic_results", []):
-                results.append({
-                    "title": h.get("title", ""),
-                    "snippet": h.get("snippet", ""),
-                    "link": h.get("link", ""),
-                    "displayed_link": h.get("displayed_link", "")
-                })
-            time.sleep(0.5)
-        except Exception as e:
-            print(f"❌ SerpAPI fetch failed: {e}")
+    for start in range(0, num_results, 10):
+        params["start"] = start
+        r = requests.get("https://serpapi.com/search", params=params)
+        data = r.json()
+        organic_results = data.get("organic_results", [])
+        for res in organic_results:
+            title = res.get("title")
+            link = res.get("link")
+            snippet = res.get("snippet", "")
+            if link:
+                results.append({"title": title, "link": link, "snippet": snippet})
+        time.sleep(1)  # avoid hitting rate limits
     return results
 
-# ---------- Main ----------
-def run_once(query, resume=True):
-    ensure_output_exists()
-    seen = load_seen()
-    last_offset = load_last_offset()
-    start_offset = last_offset if resume else 0
+def guess_source_with_gpt(title, snippet, url):
+    """Ask GPT to guess the source from trusted list"""
+    domain = tldextract.extract(url).registered_domain
+    prompt = f"""
+We have a webpage about construction AI tools.
+Title: {title}
+Snippet: {snippet}
+Domain: {domain}
 
-    print(f"🔍 Fetching results for '{query}' from offset {start_offset}")
-    raw_results = run_serpapi_pages(start_offset, query)
-    print(f"⚙ Collected {len(raw_results)} raw results")
+Rules:
+1. First check if it matches one of these sources: {TRUSTED_SOURCES}.
+2. If not, guess from the title/snippet where it might have come from (e.g., a tech review site, news site, or social media).
+3. Domain separation: If the domain itself is the company site (e.g., togal.ai), don't use that as the source. Use a reviewing platform instead.
+4. Balance: At least 50% of guessed sources should be from the list above.
+5. If no match or reasonable guess, return "General Web".
 
-    candidates = []
-    for r in raw_results:
-        website_domain = domain_from_url(r["link"])
-        src = classify_source(r["displayed_link"], r["snippet"], r["title"], website_domain)
-        candidates.append({
-            "title": r["title"],
-            "snippet": r["snippet"],
-            "link": r["link"],
-            "source": src
+Return only the guessed source name, nothing else.
+"""
+    try:
+        resp = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        return resp.choices[0].message["content"].strip()
+    except Exception as e:
+        print("GPT Guessing Error:", e)
+        return "General Web"
+
+def save_to_csv(data, filename="scraped_results.csv"):
+    """Save results to CSV"""
+    headers = ["Title", "Link", "Snippet", "Source", "Date Scraped"]
+    with open(filename, mode="w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        for row in data:
+            writer.writerow(row)
+
+def run_scraper(search_query):
+    results = serp_search(search_query)
+    final_data = []
+    for res in results:
+        title = res["title"]
+        link = res["link"]
+        snippet = res["snippet"]
+        source = guess_source_with_gpt(title, snippet, link)
+        final_data.append({
+            "Title": title,
+            "Link": link,
+            "Snippet": snippet,
+            "Source": source,
+            "Date Scraped": datetime.utcnow().isoformat()
         })
+    save_to_csv(final_data)
+    print(f"Saved {len(final_data)} results to CSV.")
 
-    print(f"⚙ Processing {len(candidates)} candidates via GPT...")
-    new_tools = 0
-
-    for i in range(0, len(candidates), BATCH_SIZE):
-        batch = candidates[i:i+BATCH_SIZE]
-        gpt_out = safe_gpt_call(build_prompt(batch))
-        if not gpt_out:
-            print("⚠ GPT failed, skipping batch.")
-            continue
-        try:
-            data = json.loads(re.sub(r"```(?:json)?|```", "", gpt_out))
-        except Exception as e:
-            print(f"⚠ JSON parse error: {e}")
-            continue
-
-        with open(OUTPUT_FILE, "a", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            for obj in data:
-                tn = obj.get("tool_name", "").strip()
-                if not tn or tn.lower() in (s.lower() for s in seen):
-                    continue
-                writer.writerow([
-                    tn,
-                    obj.get("description", ""),
-                    obj.get("website", ""),
-                    obj.get("source", ""),
-                    obj.get("tags", "AI, construction"),
-                    obj.get("reviews", "0"),
-                    obj.get("launch_date", "")
-                ])
-                seen.add(tn)
-                new_tools += 1
-
-    save_seen(seen)
-    save_last_offset(start_offset + RESULTS_PER_RUN)
-    print(f"🎯 Saved {new_tools} new tools this run.")
-
+# ----------------- MAIN -----------------
 if __name__ == "__main__":
-    q = input("Search query (default: 'construction AI tools'): ").strip() or "construction AI tools"
-    run_once(q, resume=True)
+    import sys
+    if len(sys.argv) < 2:
+        print("Usage: python mscraper.py 'search query'")
+        sys.exit(1)
+    run_scraper(sys.argv[1])

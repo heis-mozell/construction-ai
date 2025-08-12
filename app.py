@@ -1,33 +1,49 @@
-# app.py (Streamlit) - Updated for cleaner messaging & batch progress
 import streamlit as st
 import pandas as pd
 import os
-import mscraper as scraper
+import time
+from datetime import datetime
+import json
+import re
+import csv
+import mscraper as scraper  # Import scraper functions
 
 OUTPUT_FILE = scraper.OUTPUT_FILE
+
+# ✅ Helper to safely convert to string
+def safe_str(value):
+    if isinstance(value, str):
+        return value.strip()
+    if value is None:
+        return ""
+    return str(value).strip()
 
 st.set_page_config(page_title="🏗️ Construction AI Scraper", layout="wide")
 st.title("🏗️ Construction AI Tools Scraper")
 
+# Input UI
 query = st.text_input("🔍 Search query", value="construction AI tools")
 mode = st.radio("📌 Mode", ["Resume", "Start fresh"])
 run_button = st.button("🚀 Run Scraper")
 
+# Progress placeholder
 status_placeholder = st.empty()
-progress_bar = st.progress(0)
 
 if run_button:
-    status_placeholder.info("⏳ Running scraper — please wait.")
-    start_offset = scraper.load_last_offset() if mode == "Resume" else 0
+    status_placeholder.write("### ⏳ Running scraper... Please wait.")
 
+    last_offset = scraper.load_last_offset()
+    start_offset = last_offset if mode == "Resume" else 0
+
+    scraper.QUERY = query
     scraper.ensure_output_exists()
     seen = scraper.load_seen()
 
     status_placeholder.write(f"📡 Fetching up to {scraper.RESULTS_PER_RUN} results starting at offset {start_offset}...")
-    raw_results = scraper.run_serpapi_pages(start_offset, query)
-    st.write(f"⚙️ Collected **{len(raw_results)}** raw candidates.")
+    raw_results = scraper.run_serpapi_pages(start_offset)
+    st.write(f"⚙️ Collected **{len(raw_results)}** raw SERP candidates.")
 
-    # Dedup by title+link
+    # Deduplication
     unique = []
     seen_keys = set()
     for r in raw_results:
@@ -41,34 +57,87 @@ if run_button:
     # Prepare candidates
     candidates = []
     for item in unique:
-        website_domain = scraper.domain_from_url(item.get("link", ""))
+        src = scraper.classify_source(item.get("displayed_link",""), item.get("snippet",""), item.get("title",""))
         candidates.append({
-            "title": item.get("title", ""),
-            "snippet": item.get("snippet", ""),
-            "link": item.get("link", ""),
-            "source": scraper.classify_source(item.get("displayed_link", ""), item.get("snippet", ""), item.get("title", ""), website_domain)
+            "title": item.get("title",""),
+            "snippet": item.get("snippet",""),
+            "link": item.get("link",""),
+            "source": src
         })
 
-    st.write(f"📤 Sending {len(candidates)} candidates to GPT in batches of {scraper.BATCH_SIZE}...")
+    # Remove already-seen tools
+    filtered = []
+    for c in candidates:
+        naive_name = (c["title"] or "").split("—")[0].split("|")[0].strip()
+        if naive_name and naive_name.lower() in (s.lower() for s in seen):
+            continue
+        filtered.append(c)
+    st.write(f"⚙️ {len(filtered)} candidates passed naive seen check.")
 
-    # Process in batches and show progress
+    # Process in batches with GPT
     total_saved = 0
-    total_batches = (len(candidates) + scraper.BATCH_SIZE - 1) // scraper.BATCH_SIZE
-    for i in range(0, len(candidates), scraper.BATCH_SIZE):
-        batch_num = (i // scraper.BATCH_SIZE) + 1
-        st.write(f"🔄 Processing batch {batch_num} of {total_batches}...")
-        batch = candidates[i:i + scraper.BATCH_SIZE]
-        saved_count = scraper.process_batch(batch, query)  # New helper in mscraper
-        total_saved += saved_count
-        progress_bar.progress(batch_num / total_batches)
+    batch_num = 0
+    progress_bar = st.progress(0)
+    for i in range(0, len(filtered), scraper.BATCH_SIZE):
+        batch = filtered[i:i+scraper.BATCH_SIZE]
+        batch_num += 1
+        status_placeholder.write(f"⚙️ Sending batch {batch_num} ({i+1}-{i+len(batch)}) to GPT...")
+        raw = scraper.safe_gpt_call(scraper.build_prompt(batch, batch_num), max_retries=5)
 
-    scraper.save_last_offset(start_offset + scraper.RESULTS_PER_RUN)
-    status_placeholder.success(f"✅ Done! {total_saved} new tools saved. Last offset updated.")
+        if not raw:
+            continue
+        json_text = scraper.clean_json_from_gpt(raw)
+        if not json_text:
+            continue
+        try:
+            parsed = json.loads(json_text)
+            if not isinstance(parsed, list):
+                continue
+        except:
+            continue
 
-# Always attempt to show the CSV (7 columns)
+        # Write validated rows
+        with open(OUTPUT_FILE, "a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            for obj in parsed:
+                if not isinstance(obj, dict):
+                    continue
+
+                tn = safe_str(obj.get("tool_name"))
+                desc = safe_str(obj.get("description"))
+                web = safe_str(obj.get("website"))
+                src = safe_str(obj.get("source"))
+                tags = safe_str(obj.get("tags"))
+                reviews = safe_str(obj.get("reviews"))
+                launch = safe_str(obj.get("launch_date"))
+
+                if not tn or not desc or not web or not src:
+                    continue
+                if not re.match(r"^\d+$", reviews or ""):
+                    reviews = scraper.extract_review_count(desc + " " + (batch[0].get("snippet","") if batch else ""))
+                    if not reviews:
+                        reviews = "0"
+                if not tags:
+                    tags = "AI, construction"
+                if tn.lower() in (s.lower() for s in seen):
+                    continue
+
+                w.writerow([tn, desc, web, src, tags, reviews, launch])
+                seen.add(tn)
+                total_saved += 1
+
+        progress_bar.progress(min((i+scraper.BATCH_SIZE)/len(filtered), 1.0))
+        time.sleep(1.2)
+
+    scraper.save_last_offset(start_offset + (scraper.PAGES_PER_RUN * scraper.RESULTS_PER_PAGE))
+    scraper.save_seen(seen)
+
+    status_placeholder.success(f"✅ Done! {total_saved} new tools saved.")
+
+# Show CSV
 if os.path.exists(OUTPUT_FILE) and os.path.getsize(OUTPUT_FILE) > 0:
     try:
-        df = pd.read_csv(OUTPUT_FILE, names=["tool_name", "description", "website", "source", "tags", "reviews", "launch_date"])
+        df = pd.read_csv(OUTPUT_FILE, names=["Tool name", "Description", "Website", "Source", "Tags", "Reviews", "Launch date"], header=0)
         st.write(f"### 📊 Current scraped tools ({len(df)})")
         st.dataframe(df)
     except Exception as e:
