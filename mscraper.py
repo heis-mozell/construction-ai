@@ -1,117 +1,117 @@
 # mscraper.py
-# Final scraper: dynamic query input, GPT source guessing, CSV export
-# Requirements: pip install requests openai tldextract python-dotenv
+# Construction AI tool scraper with GPT-assisted source guessing
+# Requirements: pip install requests openai tldextract
 
 import os
-import time
-import csv
-import re
 import requests
+import json
+import csv
 import tldextract
-import openai
-from urllib.parse import urlparse
 from datetime import datetime
-from dotenv import load_dotenv
+from urllib.parse import urlparse
+import openai
 
-# Load environment variables
-load_dotenv()
+# Load API keys from environment
 SERP_API_KEY = os.getenv("SERP_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai.api_key = OPENAI_API_KEY
 
-# Trusted source list for matching
+# ------------------ Trusted Sources List ------------------
 TRUSTED_SOURCES = [
-    "Product Hunt", "G2", "An AI For That", "Crunchbase", "AngelList", "AppSumo", "LinkedIn",
-    "Reddit", "Medium", "YouTube", "BuiltWorlds", "ForConstructionPros", "AEC Magazine",
-    "Construction Dive", "ENR", "ArchDaily", "BIM+", "Smart Cities Dive", "Fast Company"
+    "producthunt.com", "g2.com", "an.ai.for.that", "crunchbase.com",
+    "angellist.com", "appsumo.com", "linkedin.com", "reddit.com",
+    "medium.com", "youtube.com", "builtworlds.com", "constructionexec.com",
+    "aecbusiness.com", "constructconnect.com", "forconstructionpros.com",
+    "engineeringnewsrecord.com", "archdaily.com", "constructionspecifier.com",
+    "constructiondive.com", "globalconstructionreview.com",
+    "civilplus.com", "archinect.com", "houzz.com", "designboom.com",
+    "venturebeat.com"
 ]
 
-# --- GPT Source Guess ---
-def guess_source(title, snippet, domain):
+# ------------------ Helper: Classify Source ------------------
+def classify_source(url, title="", snippet=""):
+    """
+    Classifies the source of a tool based on rules:
+    1. Primary match: Trusted source list
+    2. Secondary: Detect brand clue in title/snippet
+    3. GPT-assisted guess
+    4. Fallback: 'General Web'
+    """
+    domain_info = tldextract.extract(url)
+    domain = f"{domain_info.domain}.{domain_info.suffix}".lower()
+
+    # Rule 1: Direct match in trusted sources (different from tool domain)
+    for src in TRUSTED_SOURCES:
+        if src != domain and src in domain:
+            return src
+
+    # Rule 2: Brand clue in title/snippet
+    text_to_check = f"{title} {snippet}".lower()
+    for src in TRUSTED_SOURCES:
+        if src.replace("www.", "").split(".")[0] in text_to_check:
+            return src
+
+    # Rule 3: GPT-assisted guess
     try:
-        prompt = f"""
-        You are given a title, snippet, and domain of a tool.
-        Match it to the most likely source/platform from this list:
-        {', '.join(TRUSTED_SOURCES)}.
+        prompt = f"""Given the following tool info, guess the most likely platform or site it came from.
+Title: {title}
+Snippet: {snippet}
+URL: {url}
 
-        Rules:
-        - If domain exactly matches the source's domain, pick that source.
-        - If snippet/title contains brand clues, pick that source.
-        - If no clear match, guess from the list — avoid "General Web" unless absolutely no clue.
-        - Domain for source must be different from the tool's domain.
-
-        Title: {title}
-        Snippet: {snippet}
-        Domain: {domain}
-
-        Respond with ONLY the source name.
-        """
-
-        response = openai.ChatCompletion.create(
+Pick from: {', '.join(TRUSTED_SOURCES)}.
+If none fit, choose the most likely instead of 'General Web'.
+Answer with only the domain."""
+        
+        resp = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=10,
             temperature=0
         )
-        return response.choices[0].message["content"].strip()
+        guess = resp.choices[0].message["content"].strip().lower()
+        if guess and guess != "general web":
+            return guess
     except Exception:
-        return "General Web"
+        pass
 
-# --- SERP API Search ---
-def serpapi_search(query, page):
-    url = "https://serpapi.com/search.json"
-    params = {
-        "engine": "google",
-        "q": query,
-        "start": (page - 1) * 10,
-        "api_key": SERP_API_KEY
-    }
-    r = requests.get(url, params=params)
-    if r.status_code != 200:
-        return []
-    return r.json().get("organic_results", [])
+    # Rule 4: Fallback
+    return "General Web"
 
-# --- Main Scraper Function ---
-def run_serpapi_pages(query, pages=10):
-    if not query:
-        print("No query provided.")
-        return []
-
+# ------------------ Main Scraper ------------------
+def scrape_and_save(query, output_csv="results.csv", num_pages=5):
     all_results = []
-    seen_links = set()
 
-    for page in range(1, pages + 1):
-        print(f"Scraping page {page} for query: {query}...")
-        results = serpapi_search(query, page)
+    for page in range(num_pages):
+        start = page * 10
+        url = f"https://serpapi.com/search.json?q={query}&engine=google&start={start}&api_key={SERP_API_KEY}"
+        resp = requests.get(url)
+        data = resp.json()
 
-        for res in results:
-            link = res.get("link")
-            if not link or link in seen_links:
-                continue
+        if "organic_results" not in data:
+            continue
 
-            seen_links.add(link)
+        for res in data["organic_results"]:
+            link = res.get("link", "")
             title = res.get("title", "")
             snippet = res.get("snippet", "")
-            domain = tldextract.extract(link).registered_domain
-
-            source = guess_source(title, snippet, domain)
+            source = classify_source(link, title, snippet)
 
             all_results.append({
                 "Title": title,
                 "Link": link,
                 "Snippet": snippet,
-                "Domain": domain,
-                "Source": source
+                "Source": source,
+                "Date": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
             })
 
-        time.sleep(1)  # Avoid hitting API too fast
-
-    # Save CSV
-    filename = f"scraper_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    with open(filename, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["Title", "Link", "Snippet", "Domain", "Source"])
+    # Save to CSV
+    with open(output_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["Title", "Link", "Snippet", "Source", "Date"])
         writer.writeheader()
         writer.writerows(all_results)
 
-    print(f"Saved {len(all_results)} results to {filename}")
     return all_results
+
+if __name__ == "__main__":
+    q = input("Enter search query: ")
+    scrape_and_save(q)
