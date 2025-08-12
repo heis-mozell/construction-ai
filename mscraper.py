@@ -1,9 +1,10 @@
-# mscraper.py
+# mscraper.py — Construction AI Scraper with strong source detection + GPT fallback
 import os, time, json, csv, re
 from urllib.parse import urlparse
 import requests
 import tldextract
 import openai
+from datetime import datetime
 
 ### -------- CONFIG --------
 SERP_API_KEY = os.getenv("SERP_API_KEY", "")
@@ -22,41 +23,92 @@ RATE_LIMIT_BACKOFF = 8
 
 openai.api_key = OPENAI_API_KEY
 
+# 🏗️ Known sources — Construction / AI / Directories / Reviews / Social
 KNOWN_SOURCES = {
-    "producthunt": "Product Hunt",
-    "product-hunt": "Product Hunt",
+    # --- Construction / AEC / Industry ---
+    "aec-business.com": "AEC Business",
+    "constructconnect.com": "ConstructConnect",
+    "constructionexec.com": "Construction Executive",
+    "constructiondive.com": "Construction Dive",
+    "theconstructionindex.co.uk": "The Construction Index",
+    "constructionweekonline.com": "Construction Week",
+    "constructionglobal.com": "Construction Global",
+    "constructech.com": "Constructech",
+    "buildingenclosureonline.com": "Building Enclosure",
+    "forconstructionpros.com": "For Construction Pros",
+    "construction-today.com": "Construction Today",
+    "designandbuildreview.com": "Design & Build Review",
+    "pbctoday.co.uk": "PBC Today",
+    "giatecscientific.com": "Giatec Scientific",
+    "constructionplacements.com": "Construction Placements",
+    "building.co.uk": "Building UK",
+    "bimplus.co.uk": "BIMplus",
+    "bimcommunity.com": "BIM Community",
+    "bimstore.co.uk": "BIM Store",
+    "bimcorner.com": "BIM Corner",
+    "geospatialworld.net": "Geospatial World",
+    "archdaily.com": "ArchDaily",
+    "engineering.com": "Engineering.com",
+    "civilplus.com": "Civil Plus",
+
+    # --- AI Tool Directories & SaaS Reviews ---
+    "theresanaiforthat.com": "There's an AI For That",
+    "futurepedia.io": "Futurepedia",
+    "aitoolhunt.com": "AI Tool Hunt",
+    "toolify.ai": "Toolify",
+    "aibusiness.com": "AI Business",
+    "unite.ai": "Unite.AI",
+    "aitoptools.com": "AI Top Tools",
+    "aitooltracker.com": "AI Tool Tracker",
+    "insidr.ai": "Insidr.AI",
+    "g2.com": "G2",
+    "capterra.com": "Capterra",
+    "getapp.com": "GetApp",
+    "softwareadvice.com": "Software Advice",
+    "saasworthy.com": "SaaSworthy",
+    "trustpilot.com": "Trustpilot",
+    "producthunt.com": "Product Hunt",
+    "betalist.com": "BetaList",
+    "angel.co": "AngelList",
+    "crunchbase.com": "Crunchbase",
+    "appsumo.com": "AppSumo",
+
+    # --- Social Media & Community ---
     "linkedin.com": "LinkedIn",
     "twitter.com": "Twitter",
     "reddit.com": "Reddit",
-    "g2.com": "G2",
-    "github.com": "GitHub",
-    "appsumo.com": "AppSumo",
-    "angel.co": "AngelList",
-    "crunchbase.com": "Crunchbase",
     "youtube.com": "YouTube",
     "medium.com": "Medium",
     "dev.to": "Dev.to",
-    "news": "News",
+    "facebook.com": "Facebook",
+    "instagram.com": "Instagram",
+    "tiktok.com": "TikTok",
 }
 
-# ✅ Correct CSV header (7 columns)
 def ensure_output_exists():
     if not os.path.exists(OUTPUT_FILE):
         with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerow([
+            w = csv.writer(f)
+            w.writerow([
                 "tool_name",
                 "description",
                 "website",
                 "source",
                 "tags",
                 "reviews",
-                "launch_date"
+                "launch_date",
+                "scrape_date"
             ])
 
 def load_seen():
+    s = set()
     if os.path.exists(SEEN_FILE):
-        return set(open(SEEN_FILE, "r", encoding="utf-8").read().splitlines())
-    return set()
+        with open(SEEN_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                v = line.strip()
+                if v:
+                    s.add(v)
+    return s
 
 def save_seen(seen_set):
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
@@ -64,39 +116,96 @@ def save_seen(seen_set):
             f.write(s + "\n")
 
 def load_last_offset():
-    try:
-        return int(open(LAST_OFFSET_FILE, "r").read().strip())
-    except:
-        return 0
+    if os.path.exists(LAST_OFFSET_FILE):
+        try:
+            return int(open(LAST_OFFSET_FILE, "r").read().strip())
+        except:
+            return 0
+    return 0
 
 def save_last_offset(offset):
     with open(LAST_OFFSET_FILE, "w", encoding="utf-8") as f:
         f.write(str(int(offset)))
 
-def classify_source(displayed_link, snippet, title):
+def domain_from_url(url):
+    if not url:
+        return ""
+    try:
+        ex = tldextract.extract(url)
+        if ex.domain:
+            return (ex.domain + (("." + ex.suffix) if ex.suffix else "")).lower()
+    except:
+        pass
+    try:
+        return urlparse(url).netloc.lower().replace("www.", "")
+    except:
+        return ""
+
+def classify_source(displayed_link, snippet, title, website_url=None):
+    """
+    Detects source of the tool based on known domains and avoids marking
+    the tool's own website as the source.
+    """
     s = (displayed_link or "").lower()
-    for k, v in KNOWN_SOURCES.items():
-        if k in s:
-            return v
-    txt = (snippet or "") + " " + (title or "")
-    txt = txt.lower()
-    if "product hunt" in txt:
+    full_text = (displayed_link or "") + " " + (snippet or "") + " " + (title or "")
+    full_text = full_text.lower()
+
+    website_domain = ""
+    if website_url:
+        website_domain = domain_from_url(website_url)
+
+    for domain, source_name in KNOWN_SOURCES.items():
+        if domain in s or domain in full_text:
+            if website_domain and domain in website_domain:
+                continue
+            return source_name
+
+    # Fallback keywords
+    if "product hunt" in full_text:
         return "Product Hunt"
-    if "linkedin" in txt:
+    if "linkedin" in full_text:
         return "LinkedIn"
-    if "reddit" in txt:
+    if "reddit" in full_text:
         return "Reddit"
-    if "g2" in txt:
+    if "g2" in full_text:
         return "G2"
+    if "construction" in full_text:
+        return "Construction News"
+
     return "Google Search"
+
+def gpt_guess_source(tool_name, description):
+    """
+    Asks GPT to guess a relevant source for a tool if unknown.
+    """
+    prompt = f"""
+You are a research assistant for Construction AI tools.
+A tool is called '{tool_name}' and its description is:
+{description}
+
+Guess the most likely source where this tool could be listed or discovered,
+choosing from known industry, AI directories, SaaS review platforms, or social media.
+
+Only return the source name (e.g., "G2", "Product Hunt", "Construction Dive", "LinkedIn").
+"""
+    try:
+        resp = openai.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        guess = resp.choices[0].message.content.strip()
+        return guess
+    except:
+        return "Google Search"
 
 def extract_review_count(text):
     if not text:
         return "0"
-    m = re.search(r"(\d{1,3}(?:[,\s]\d{3})*)\s+(?:reviews?|ratings?|votes?)", text, re.I)
+    m = re.search(r"(\d{1,3}(?:[,\s]\d{3})*)\s+(?:reviews?|ratings?|votes?)", text, re.IGNORECASE)
     if m:
         return re.sub(r"[,\s]", "", m.group(1))
-    m2 = re.search(r"(\d{1,3}(?:[,\s]\d{3})*)\s+(?:users|customers|clients)", text, re.I)
+    m2 = re.search(r"(\d{1,3}(?:[,\s]\d{3})*)\s+(?:users|customers|clients)", text, re.IGNORECASE)
     if m2:
         return re.sub(r"[,\s]", "", m2.group(1))
     return "0"
@@ -104,7 +213,7 @@ def extract_review_count(text):
 def clean_json_from_gpt(raw):
     if not raw:
         return None
-    m = re.search(r"(\[.*\])", raw, re.DOTALL)
+    m = re.search(r"(\[.*\]|\{.*\})", raw, re.DOTALL)
     return m.group(0) if m else None
 
 def safe_gpt_call(prompt, max_retries=5):
@@ -113,7 +222,7 @@ def safe_gpt_call(prompt, max_retries=5):
         try:
             resp = openai.chat.completions.create(
                 model=OPENAI_MODEL,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role":"user","content": prompt}],
                 temperature=0
             )
             return resp.choices[0].message.content
@@ -127,12 +236,10 @@ def safe_gpt_call(prompt, max_retries=5):
 def build_prompt(batch, batch_num):
     payload = json.dumps(batch, ensure_ascii=False)
     return f"""
-Extract tool details if tool_name is found in title or snippet.
-Return STRICT JSON array of objects with:
-tool_name, description (8-30 words), website (domain only),
-source (prefer reputable site from list, else "Google Search"),
-tags (max 6), reviews (integer string), launch_date.
-Skip entries without tool_name.
+You are a strict extractor. INPUT is a JSON array of up to {BATCH_SIZE} search results (title, snippet, link, source).
+For each input, extract ONLY if tool_name can be confidently identified from title/snippet.
+Output JSON array only with:
+tool_name, description, website, source, tags, reviews, launch_date.
 Batch: {batch_num}
 INPUT:
 {payload}
