@@ -56,5 +56,3 @@ if run_button:
     st.write(f"### 📊 Updated scraped tools ({len(df)})")
     st.dataframe(df, use_container_width=True)
 
-# Footnote
-st.caption("Tip: Set API keys in your Streamlit app settings → Secrets. Supported: OPENAI_API_KEY, GROK_API_KEY, SERP_API_KEY, GOOGLE_API_KEY, GOOGLE_CSE_ID, BING_API_KEY.")
